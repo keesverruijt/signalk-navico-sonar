@@ -102,6 +102,23 @@ function drawColumn (samples) {
   ctx.putImageData(col, W - 1, 0)
 }
 
+// Same bottom pick as the plugin (lib/protocol.js estimateBottomBin): deepest
+// sustained return past the near-field ring, walked up to its leading edge.
+function bottomBin (s, nearFieldSkip = 20) {
+  const n = s.length; if (!n) return -1
+  let maxAmp = 0; for (let i = 0; i < n; i++) if (s[i] > maxAmp) maxAmp = s[i]
+  if (!maxAmp) return -1
+  let nf = 0; while (nf < n && s[nf] >= 0.6 * maxAmp) nf++
+  const start = Math.max(nearFieldSkip, nf + Math.round(0.02 * n)); if (start >= n) return -1
+  let regionMax = 0; for (let i = start; i < n; i++) if (s[i] > regionMax) regionMax = s[i]
+  if (!regionMax) return -1
+  const thr = Math.max(8, 0.5 * regionMax)
+  let bi = -1; for (let i = n - 1; i >= start; i--) { if (s[i] >= thr) { bi = i; break } }
+  if (bi < 0) return -1
+  let top = bi; while (top > start && s[top - 1] >= 0.5 * thr) top--
+  return top
+}
+
 function connect () {
   const ws = new WebSocket(wsUrl())
   ws.binaryType = 'arraybuffer'
@@ -127,9 +144,8 @@ function connect () {
     const range = rangeUpper > 0 ? rangeUpper : rangeLower // display range = canvas height
     drawColumn(samples)
     drawAxis(range)
-    // depth from strongest bin past near-field
-    let best = -1, bi = -1
-    for (let i = 20; i < n; i++) if (samples[i] > best) { best = samples[i]; bi = i }
+    // depth = leading edge of the deepest sustained return (skip near-field)
+    const bi = bottomBin(samples)
     if (bi > 0 && range > 0) depthEl.textContent = ((bi / n) * range).toFixed(1) + ' m'
   }
 }

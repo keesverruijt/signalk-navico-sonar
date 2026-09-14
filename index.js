@@ -143,9 +143,10 @@ module.exports = function (app) {
         rangeUpper: d.rangeUpper, rangeLower: d.rangeLower, samples: d.samples })
 
       if (opts.emitDepth && d.channel === 0x02) {
+        const range = d.rangeUpper > 0 ? d.rangeUpper : d.rangeLower // display range (metres)
         const b = proto.estimateBottomBin(d.samples, opts.nearFieldSkip)
-        if (b.bin > 0 && d.rangeLower > 0) {
-          const depth = (b.bin / d.samples.length) * d.rangeLower
+        if (b.bin > 0 && range > 0) {
+          const depth = (b.bin / d.samples.length) * range
           app.handleMessage(plugin.id, {
             updates: [{ source: { label: plugin.id + ':' + (src ? src.name : rinfo.address) },
               values: [{ path: 'environment.depth.belowTransducer', value: depth }] }]
