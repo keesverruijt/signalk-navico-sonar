@@ -139,15 +139,19 @@ module.exports = function (app) {
     clients = new Set(); sources.clear()
   }
 
-  // compact binary frame: [0x01][channel][u32 seq][f32 rangeLower][u16 n][n bytes samples]
+  // compact binary frame:
+  //   [0x01][channel][u32 seq][f32 rangeLower][u16 n][4B src IPv4][n bytes samples]
+  // The source IPv4 lets the webapp filter the waterfall to one source.
   function packPing (p) {
     const n = p.samples.length
-    const buf = Buffer.allocUnsafe(1 + 1 + 4 + 4 + 2 + n)
+    const buf = Buffer.allocUnsafe(1 + 1 + 4 + 4 + 2 + 4 + n)
     buf[0] = 0x01; buf[1] = p.channel
     buf.writeUInt32LE(p.pingSeq >>> 0, 2)
     buf.writeFloatLE(p.rangeLower || 0, 6)
     buf.writeUInt16LE(n, 10)
-    p.samples.copy(buf, 12)
+    const oct = String(p.address || '').split('.')
+    for (let i = 0; i < 4; i++) buf[12 + i] = oct.length === 4 ? (parseInt(oct[i], 10) & 0xff) : 0
+    p.samples.copy(buf, 16)
     return buf
   }
 

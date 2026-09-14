@@ -99,13 +99,15 @@ function connect () {
       if (m.type === 'sources') updateSources(m.sources)
       return
     }
-    // binary ping frame
+    // binary ping frame: [0x01][channel][u32 seq][f32 rangeLower][u16 n][4B src IPv4][n samples]
     const dv = new DataView(ev.data)
     const channel = dv.getUint8(1)
     if (channel !== 0x02) return // conventional only for the main view
     const rangeLower = dv.getFloat32(6, true)
     const n = dv.getUint16(10, true)
-    const samples = new Uint8Array(ev.data, 12, n)
+    const srcIP = `${dv.getUint8(12)}.${dv.getUint8(13)}.${dv.getUint8(14)}.${dv.getUint8(15)}`
+    if (filterAddr && srcIP !== filterAddr) return // not the selected source
+    const samples = new Uint8Array(ev.data, 16, n)
     drawColumn(samples, rangeLower)
     // depth from strongest bin past near-field
     let best = -1, bi = -1
@@ -124,7 +126,11 @@ function updateSources (list) {
   }
   srcSel.value = cur
 }
-srcSel.onchange = () => { filterAddr = srcSel.value }
+srcSel.onchange = () => {
+  filterAddr = srcSel.value
+  ctx.fillStyle = '#0a0e14'; ctx.fillRect(0, 0, W, H) // clear old source's trace
+  depthEl.textContent = '-- m'
+}
 connect()
 </script>
 </body>
