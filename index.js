@@ -142,13 +142,19 @@ module.exports = function (app) {
       broadcast({ type: 'ping', address: rinfo.address, channel: d.channel, pingSeq: d.pingSeq,
         rangeUpper: d.rangeUpper, rangeLower: d.rangeLower, samples: d.samples })
 
-      if (opts.emitDepth && d.channel === 0x02) {
+      // Only a real downward sounder drives depth. Skip role-0x15 networked
+      // sources and transducerless announcers (e.g. a Vulcan forwardscan mapped
+      // as conventional reads a bogus depth). A configured preferSource wins.
+      const depthOk = opts.preferSource
+        ? (src && src.name === opts.preferSource)
+        : (src && src.role === 0x18 && src.transducer && src.transducer !== 'Unknown')
+      if (opts.emitDepth && d.channel === 0x02 && depthOk) {
         const range = d.rangeUpper > 0 ? d.rangeUpper : d.rangeLower // display range (metres)
         const b = proto.estimateBottomBin(d.samples, opts.nearFieldSkip)
         if (b.bin > 0 && range > 0) {
           const depth = (b.bin / d.samples.length) * range
           app.handleMessage(plugin.id, {
-            updates: [{ source: { label: plugin.id + ':' + (src ? src.name : rinfo.address) },
+            updates: [{ source: { label: src ? src.name : rinfo.address },
               values: [{ path: 'environment.depth.belowTransducer', value: depth }] }]
           })
         }
