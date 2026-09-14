@@ -11,7 +11,22 @@ module.exports = function (app) {
   let wss = null
   let upgradeHandler = null   // only set on the app.server fallback path
   const sources = new Map()   // address -> heartbeat info
+  const lastData = new Map()  // address -> ms timestamp of last echogram packet
   let clients = new Set()
+  let lastSourcesSig = ''
+  const DATA_TTL_MS = 15000   // a source is "active" if it sent data this recently
+
+  // A source is worth listing when it has a real transducer OR is currently
+  // producing echogram data. Bare role-0x18 announcers (e.g. an MFD with no
+  // transducer, empty xdcr, no data) are marked inactive so the UI can hide them.
+  const sourceList = () => {
+    const now = Date.now()
+    return [...sources.entries()].map(([addr, hb]) => {
+      const td = hb.transducer && hb.transducer !== 'Unknown' ? hb.transducer : ''
+      const hasData = now - (lastData.get(addr) || 0) < DATA_TTL_MS
+      return Object.assign({}, hb, { hasData, active: !!td || hasData })
+    })
+  }
 
   const plugin = {
     id: 'signalk-navico-sonar',
@@ -29,7 +44,7 @@ module.exports = function (app) {
 
   const onWsConnection = (ws) => {
     clients.add(ws)
-    try { ws.send(JSON.stringify({ type: 'sources', sources: [...sources.values()] })) } catch (_) {}
+    try { ws.send(JSON.stringify({ type: 'sources', sources: sourceList() })) } catch (_) {}
     ws.on('close', () => clients.delete(ws))
     ws.on('error', () => clients.delete(ws))
   }
@@ -83,6 +98,15 @@ module.exports = function (app) {
       for (const ws of clients) { try { ws.send(msg) } catch (_) {} }
     }
 
+    // Re-send the source list to clients only when the set of *active* sources
+    // changes (a source appears, starts producing data, or goes stale), so the
+    // dropdown reflects reality without spamming.
+    const maybeBroadcastSources = () => {
+      const list = sourceList()
+      const sig = list.map(s => s.address + ':' + (s.active ? 1 : 0)).join(',')
+      if (sig !== lastSourcesSig) { lastSourcesSig = sig; broadcast({ type: 'sources', sources: list }) }
+    }
+
     const bind = (port, handler) => {
       const s = dgram.createSocket({ type: 'udp4', reuseAddr: true })
       s.on('message', (buf, rinfo) => { try { handler(buf, rinfo) } catch (e) { app.debug('parse err ' + e.message) } })
@@ -96,7 +120,8 @@ module.exports = function (app) {
       if (!hb) return
       const prev = sources.get(rinfo.address)
       sources.set(rinfo.address, hb)
-      if (!prev) { app.debug(`source ${rinfo.address} ${hb.name} (${hb.model})`); broadcast({ type: 'sources', sources: [...sources.values()] }) }
+      if (!prev) app.debug(`source ${rinfo.address} ${hb.name} (${hb.model})`)
+      maybeBroadcastSources() // catches new sources and sources going stale
     })
 
     bind(proto.STATUS_PORT, (buf, rinfo) => {
@@ -108,6 +133,10 @@ module.exports = function (app) {
       const d = proto.parseData(buf)
       if (!d || d.kind !== 'data') return
       const src = sources.get(rinfo.address)
+      // mark this source as live; announce if it just became active
+      const prevTs = lastData.get(rinfo.address) || 0
+      lastData.set(rinfo.address, Date.now())
+      if (Date.now() - prevTs > DATA_TTL_MS) maybeBroadcastSources()
       // filter to the chosen source (or all if none chosen)
       if (opts.preferSource && (!src || src.name !== opts.preferSource)) return
       broadcast({ type: 'ping', address: rinfo.address, channel: d.channel, pingSeq: d.pingSeq,

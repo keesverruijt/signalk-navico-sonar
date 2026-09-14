@@ -120,11 +120,16 @@ function updateSources (list) {
   const cur = srcSel.value
   srcSel.innerHTML = '<option value="">(any)</option>'
   for (const s of list) {
+    if (s.active === false) continue // hide bare announcers (no transducer, no data)
     const o = document.createElement('option')
-    o.value = s.address; o.textContent = `${s.name} — ${s.model}${s.transducer ? ' [' + s.transducer + ']' : ''}`
+    o.value = s.address
+    const tag = s.transducer ? ' [' + s.transducer + ']' : (s.hasData ? ' [live]' : '')
+    o.textContent = `${s.name} — ${s.model}${tag}`
     srcSel.appendChild(o)
   }
-  srcSel.value = cur
+  // if the selected source vanished from the active list, fall back to (any)
+  if (cur && !list.some(s => s.address === cur && s.active !== false)) { srcSel.value = ''; filterAddr = '' }
+  else srcSel.value = cur
 }
 srcSel.onchange = () => {
   filterAddr = srcSel.value
