@@ -9,6 +9,7 @@ const proto = require('./lib/protocol')
 module.exports = function (app) {
   let sockets = []
   let wss = null
+  let upgradeHandler = null   // only set on the app.server fallback path
   const sources = new Map()   // address -> heartbeat info
   let clients = new Set()
 
@@ -18,11 +19,20 @@ module.exports = function (app) {
     description: 'Consumes the Navico NEON sonar network protocol (echogram + depth).'
   }
 
-  // Same-origin WebSocket path: the waterfall connects to
+  // Same-origin WebSocket: the waterfall connects to
   //   ws(s)://<sk-host>/plugins/signalk-navico-sonar/stream
   // No separate port — TLS (wss) and access control are inherited from the SK
-  // HTTP server. We attach to that server's `upgrade` event in registerWithRouter().
-  const WS_PATH = '/plugins/' + plugin.id + '/stream'
+  // HTTP server. Preferred path is app.registerWebSocket('/stream'); older
+  // servers fall back to hooking app.server's `upgrade` event directly.
+  const WS_SUBPATH = '/stream'
+  const WS_PATH = '/plugins/' + plugin.id + WS_SUBPATH
+
+  const onWsConnection = (ws) => {
+    clients.add(ws)
+    try { ws.send(JSON.stringify({ type: 'sources', sources: [...sources.values()] })) } catch (_) {}
+    ws.on('close', () => clients.delete(ws))
+    ws.on('error', () => clients.delete(ws))
+  }
 
   plugin.schema = {
     type: 'object',
@@ -36,20 +46,33 @@ module.exports = function (app) {
   plugin.start = function (options) {
     const opts = Object.assign({ emitDepth: true, preferSource: '', nearFieldSkip: 20 }, options)
 
-    // --- WebSocket fan-out to the webapp (lazy require so the plugin loads even if ws missing) ---
-    // noServer mode: no listen(); upgrades are routed in from the shared SK
-    // HTTP server by the handler installed in registerWithRouter().
+    // --- WebSocket fan-out to the webapp, same-origin on the SK HTTP server ---
     try {
-      const WebSocket = require('ws')
-      wss = new WebSocket.Server({ noServer: true })
-      wss.on('connection', (ws) => {
-        clients.add(ws)
-        ws.send(JSON.stringify({ type: 'sources', sources: [...sources.values()] }))
-        ws.on('close', () => clients.delete(ws))
-      })
-      app.debug(`waterfall WS ready at ${WS_PATH}`)
+      if (typeof app.registerWebSocket === 'function') {
+        // Official API: endpoint at /plugins/<id>/stream, auto-removed on stop.
+        wss = app.registerWebSocket(WS_SUBPATH)
+        wss.on('connection', onWsConnection)
+        app.debug(`waterfall WS at ${WS_PATH} (registerWebSocket)`)
+      } else if (app.server && typeof app.server.on === 'function') {
+        // Fallback for older SK servers without registerWebSocket: hook the
+        // shared HTTP server's upgrade event ourselves (path-filtered).
+        const WebSocket = require('ws')
+        wss = new WebSocket.Server({ noServer: true })
+        wss.on('connection', onWsConnection)
+        upgradeHandler = (req, socket, head) => {
+          let path = req.url
+          try { path = new URL(req.url, 'http://x').pathname } catch (_) {}
+          if (path !== WS_PATH) return // not ours — leave it for other handlers
+          if (!wss) { socket.destroy(); return }
+          wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req))
+        }
+        app.server.on('upgrade', upgradeHandler)
+        app.debug(`waterfall WS at ${WS_PATH} (app.server fallback)`)
+      } else {
+        app.error('no registerWebSocket and no app.server; webapp live stream disabled')
+      }
     } catch (e) {
-      app.error('ws module not available; webapp live stream disabled: ' + e.message)
+      app.error('webapp live stream disabled: ' + e.message)
     }
 
     const broadcast = (obj) => {
@@ -105,34 +128,13 @@ module.exports = function (app) {
     app.setPluginStatus('Listening for Navico sonar on UDP 10752/10753/10754')
   }
 
-  // Mount the webapp's WebSocket on the SK server's own HTTP server (same origin,
-  // same port), instead of opening a private port. WS upgrades fire at the Node
-  // HTTP-server level rather than through Express, so we hook the server's
-  // `upgrade` event. We grab the server from the first request that reaches our
-  // router (req.socket.server), install a path-filtered handler once, and hand
-  // matching upgrades to our noServer WebSocket.Server.
-  plugin.registerWithRouter = function (router) {
-    let installed = false
-    router.use((req, _res, next) => {
-      if (!installed && req.socket && req.socket.server && typeof req.socket.server.on === 'function') {
-        const server = req.socket.server
-        server.on('upgrade', (upReq, socket, head) => {
-          let path = upReq.url
-          try { path = new URL(upReq.url, 'http://x').pathname } catch (_) {}
-          if (path !== WS_PATH) return // not ours — leave it for other upgrade handlers
-          if (!wss) { socket.destroy(); return } // plugin stopped
-          wss.handleUpgrade(upReq, socket, head, (ws) => wss.emit('connection', ws, upReq))
-        })
-        installed = true
-        app.debug(`sonar WS upgrade mounted at ${WS_PATH}`)
-      }
-      next()
-    })
-  }
-
   plugin.stop = function () {
     for (const s of sockets) { try { s.close() } catch (_) {} }
     sockets = []
+    if (upgradeHandler && app.server) { try { app.server.removeListener('upgrade', upgradeHandler) } catch (_) {} }
+    upgradeHandler = null
+    // registerWebSocket endpoints are removed by the server on stop; closing the
+    // WSS here just drops any open clients. (Harmless on the fallback path too.)
     if (wss) { try { wss.close() } catch (_) {} wss = null }
     clients = new Set(); sources.clear()
   }
