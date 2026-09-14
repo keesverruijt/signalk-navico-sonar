@@ -30,8 +30,17 @@
   <div id="status">connecting…</div>
 </div>
 <script>
-// Live echogram waterfall. Connects to the plugin WebSocket (default :3336).
-const WS_PORT = new URLSearchParams(location.search).get('ws') || 3336
+// Live echogram waterfall. Same-origin WebSocket on the SK server:
+//   ws(s)://<sk-host>/plugins/signalk-navico-sonar/stream
+// (wss is chosen automatically when the page is served over https). For offline
+// dev against tools/replay-pcap.js, override with ?ws=PORT or ?ws=ws://host:port.
+const WS_PATH = '/plugins/signalk-navico-sonar/stream'
+function wsUrl () {
+  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const ov = new URLSearchParams(location.search).get('ws')
+  if (ov) return /^\d+$/.test(ov) ? `${scheme}//${location.hostname}:${ov}` : ov
+  return `${scheme}//${location.host}${WS_PATH}`
+}
 const cv = document.getElementById('c'), ctx = cv.getContext('2d')
 const depthEl = document.getElementById('depth'), statusEl = document.getElementById('status')
 const srcSel = document.getElementById('src'), palSel = document.getElementById('pal'), gainEl = document.getElementById('gain')
@@ -80,7 +89,7 @@ function drawColumn (samples, rangeLower) {
 }
 
 function connect () {
-  const ws = new WebSocket(`ws://${location.hostname}:${WS_PORT}`)
+  const ws = new WebSocket(wsUrl())
   ws.binaryType = 'arraybuffer'
   ws.onopen = () => { statusEl.textContent = 'connected' }
   ws.onclose = () => { statusEl.textContent = 'disconnected — retrying'; setTimeout(connect, 1500) }

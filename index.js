@@ -1,6 +1,5 @@
 'use strict'
 const dgram = require('dgram')
-const http = require('http')
 const proto = require('./lib/protocol')
 
 // Signal K node-server plugin.
@@ -10,7 +9,6 @@ const proto = require('./lib/protocol')
 module.exports = function (app) {
   let sockets = []
   let wss = null
-  let httpServer = null
   const sources = new Map()   // address -> heartbeat info
   let clients = new Set()
 
@@ -20,10 +18,15 @@ module.exports = function (app) {
     description: 'Consumes the Navico NEON sonar network protocol (echogram + depth).'
   }
 
+  // Same-origin WebSocket path: the waterfall connects to
+  //   ws(s)://<sk-host>/plugins/signalk-navico-sonar/stream
+  // No separate port — TLS (wss) and access control are inherited from the SK
+  // HTTP server. We attach to that server's `upgrade` event in registerWithRouter().
+  const WS_PATH = '/plugins/' + plugin.id + '/stream'
+
   plugin.schema = {
     type: 'object',
     properties: {
-      wsPort: { type: 'number', title: 'WebSocket port for the waterfall webapp', default: 3336 },
       emitDepth: { type: 'boolean', title: 'Emit environment.depth.belowTransducer from bottom pick', default: true },
       preferSource: { type: 'string', title: 'Preferred source name (e.g. "kiel2"); blank = first NEON sonar', default: '' },
       nearFieldSkip: { type: 'number', title: 'Bins to skip for bottom detection (near-field ring)', default: 20 }
@@ -31,19 +34,20 @@ module.exports = function (app) {
   }
 
   plugin.start = function (options) {
-    const opts = Object.assign({ wsPort: 3336, emitDepth: true, preferSource: '', nearFieldSkip: 20 }, options)
+    const opts = Object.assign({ emitDepth: true, preferSource: '', nearFieldSkip: 20 }, options)
 
     // --- WebSocket fan-out to the webapp (lazy require so the plugin loads even if ws missing) ---
+    // noServer mode: no listen(); upgrades are routed in from the shared SK
+    // HTTP server by the handler installed in registerWithRouter().
     try {
       const WebSocket = require('ws')
-      httpServer = http.createServer()
-      wss = new WebSocket.Server({ server: httpServer })
+      wss = new WebSocket.Server({ noServer: true })
       wss.on('connection', (ws) => {
         clients.add(ws)
         ws.send(JSON.stringify({ type: 'sources', sources: [...sources.values()] }))
         ws.on('close', () => clients.delete(ws))
       })
-      httpServer.listen(opts.wsPort, () => app.debug(`waterfall WS on :${opts.wsPort}`))
+      app.debug(`waterfall WS ready at ${WS_PATH}`)
     } catch (e) {
       app.error('ws module not available; webapp live stream disabled: ' + e.message)
     }
@@ -101,11 +105,35 @@ module.exports = function (app) {
     app.setPluginStatus('Listening for Navico sonar on UDP 10752/10753/10754')
   }
 
+  // Mount the webapp's WebSocket on the SK server's own HTTP server (same origin,
+  // same port), instead of opening a private port. WS upgrades fire at the Node
+  // HTTP-server level rather than through Express, so we hook the server's
+  // `upgrade` event. We grab the server from the first request that reaches our
+  // router (req.socket.server), install a path-filtered handler once, and hand
+  // matching upgrades to our noServer WebSocket.Server.
+  plugin.registerWithRouter = function (router) {
+    let installed = false
+    router.use((req, _res, next) => {
+      if (!installed && req.socket && req.socket.server && typeof req.socket.server.on === 'function') {
+        const server = req.socket.server
+        server.on('upgrade', (upReq, socket, head) => {
+          let path = upReq.url
+          try { path = new URL(upReq.url, 'http://x').pathname } catch (_) {}
+          if (path !== WS_PATH) return // not ours — leave it for other upgrade handlers
+          if (!wss) { socket.destroy(); return } // plugin stopped
+          wss.handleUpgrade(upReq, socket, head, (ws) => wss.emit('connection', ws, upReq))
+        })
+        installed = true
+        app.debug(`sonar WS upgrade mounted at ${WS_PATH}`)
+      }
+      next()
+    })
+  }
+
   plugin.stop = function () {
     for (const s of sockets) { try { s.close() } catch (_) {} }
     sockets = []
     if (wss) { try { wss.close() } catch (_) {} wss = null }
-    if (httpServer) { try { httpServer.close() } catch (_) {} httpServer = null }
     clients = new Set(); sources.clear()
   }
 

@@ -49,8 +49,10 @@ SRX subscribes to / controls a source. Documented for a future publisher/bridge.
 - Binds `10752/10753/10754`, parses them (`lib/protocol.js`).
 - Emits `environment.depth.belowTransducer` from a bottom pick on the conventional channel
   (best-effort; calibratable via options).
-- Streams parsed pings to the webapp over a WebSocket (default port `3336`) as a compact binary
-  frame; the webapp renders a scrolling waterfall on a `<canvas>`.
+- Streams parsed pings to the webapp over a **same-origin WebSocket** at
+  `/plugins/signalk-navico-sonar/stream` (no private port — it rides the Signal K HTTP server, so it
+  inherits `wss://` TLS and access control) as a compact binary frame; the webapp renders a scrolling
+  waterfall on a `<canvas>`.
 
 ## Install (on your Signal K server)
 ```
@@ -58,8 +60,10 @@ cd ~/.signalk/node_modules   # or your SK plugin dir
 git clone <this> signalk-navico-sonar && cd signalk-navico-sonar && npm install
 # enable "Navico NEON Sonar" in the SK admin UI (Server → Plugin Config)
 ```
-Webapp: `http://<sk-server>:3000/signalk-navico-sonar/` (or open `public/index.html` and point it
-at the WS port with `?ws=3336`).
+Webapp: `http://<sk-server>:3000/signalk-navico-sonar/`. It connects back to the plugin over a
+same-origin WebSocket automatically (`ws://` or `wss://` to match the page), so it works remotely /
+behind a reverse proxy with no extra port. For offline dev you can open `public/index.html`
+standalone and point it elsewhere with `?ws=<port>` or `?ws=ws://host:port`.
 
 ## Develop / test offline (no hardware)
 ```
