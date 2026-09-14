@@ -12,8 +12,9 @@
   select, label { font: inherit; color: inherit; }
   select { background: #1e2530; border: 1px solid #313847; border-radius: 6px; padding: 4px 8px; }
   #depth { font-size: 22px; font-weight: 700; color: #a6e3a1; margin-left: auto; }
-  #wrap { position: relative; }
-  canvas { display: block; width: 100%; height: calc(100vh - 46px); image-rendering: pixelated; }
+  #wrap { position: relative; height: calc(100vh - 46px); }
+  #c { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+  #axis { position: absolute; top: 0; right: 0; height: 100%; pointer-events: none; }
   #status { position: absolute; left: 8px; bottom: 8px; font-size: 11px; color: #7f849c; background: #0009; padding: 3px 6px; border-radius: 4px; }
 </style>
 </head>
@@ -27,6 +28,7 @@
 </header>
 <div id="wrap">
   <canvas id="c"></canvas>
+  <canvas id="axis"></canvas>
   <div id="status">connecting…</div>
 </div>
 <script>
@@ -42,16 +44,37 @@ function wsUrl () {
   return `${scheme}//${location.host}${WS_PATH}`
 }
 const cv = document.getElementById('c'), ctx = cv.getContext('2d')
+const ax = document.getElementById('axis'), actx = ax.getContext('2d')
 const depthEl = document.getElementById('depth'), statusEl = document.getElementById('status')
 const srcSel = document.getElementById('src'), palSel = document.getElementById('pal'), gainEl = document.getElementById('gain')
-let W = 0, H = 0, colBins = 1400
+let W = 0, H = 0
 let filterAddr = ''
+let lastAxisRange = -1
 
 function resize () {
   W = cv.width = cv.clientWidth; H = cv.height = cv.clientHeight
+  ax.width = 54; ax.height = ax.clientHeight
   ctx.fillStyle = '#0a0e14'; ctx.fillRect(0, 0, W, H)
+  lastAxisRange = -1 // force axis redraw
 }
 window.addEventListener('resize', resize); resize()
+
+// Depth scale on a SEPARATE overlay canvas so it never enters the scroll buffer.
+function drawAxis (range) {
+  if (!(range > 0) || Math.abs(range - lastAxisRange) < 0.05) return
+  lastAxisRange = range
+  const w = ax.width, h = ax.height
+  actx.clearRect(0, 0, w, h)
+  actx.font = '11px system-ui'; actx.textAlign = 'right'; actx.textBaseline = 'middle'
+  for (let k = 0; k <= 4; k++) {
+    const y = Math.min(h - 1, Math.max(1, Math.round(h * k / 4)))
+    actx.strokeStyle = '#ffffff44'; actx.beginPath(); actx.moveTo(w - 34, y + 0.5); actx.lineTo(w, y + 0.5); actx.stroke()
+    const label = (range * k / 4).toFixed(range < 20 ? 1 : 0) + 'm'
+    const tw = actx.measureText(label).width
+    actx.fillStyle = '#000a'; actx.fillRect(w - tw - 8, y - 8, tw + 8, 16)
+    actx.fillStyle = '#dfe6f0'; actx.fillText(label, w - 4, y)
+  }
+}
 
 // palettes: map amplitude 0..255 -> [r,g,b]
 const palettes = {
@@ -60,13 +83,13 @@ const palettes = {
   Ice: a => { const t = a / 255; return [(t * t * 255) | 0, (t * 200) | 0, (80 + t * 175) | 0] }
 }
 
-function drawColumn (samples, rangeLower) {
+function drawColumn (samples) {
   const gain = parseFloat(gainEl.value)
   const pal = palettes[palSel.value] || palettes.Amber
-  // scroll left by 1px
+  // scroll the whole waterfall left by 1px
   const img = ctx.getImageData(1, 0, W - 1, H)
   ctx.putImageData(img, 0, 0)
-  // draw new column at right edge
+  // draw the new ping as the rightmost column
   const col = ctx.createImageData(1, H)
   const n = samples.length
   for (let y = 0; y < H; y++) {
@@ -77,15 +100,6 @@ function drawColumn (samples, rangeLower) {
     col.data[o] = r; col.data[o + 1] = g; col.data[o + 2] = b; col.data[o + 3] = 255
   }
   ctx.putImageData(col, W - 1, 0)
-  // depth scale ticks (right side) every 25% of range
-  if (rangeLower > 0) {
-    ctx.fillStyle = '#0006'; ctx.fillRect(W - 46, 0, 46, H)
-    ctx.fillStyle = '#bac2de'; ctx.font = '11px system-ui'
-    for (let k = 0; k <= 4; k++) {
-      const y = (H * k / 4) | 0
-      ctx.fillText(((rangeLower * k / 4)).toFixed(0) + 'm', W - 42, Math.min(H - 2, y + 11))
-    }
-  }
 }
 
 function connect () {
@@ -99,20 +113,24 @@ function connect () {
       if (m.type === 'sources') updateSources(m.sources)
       return
     }
-    // binary ping frame: [0x01][channel][u32 seq][f32 rangeLower][u16 n][4B src IPv4][n samples]
+    // binary ping frame (20B hdr):
+    // [0x01][channel][u32 seq][f32 rangeUpper][f32 rangeLower][u16 n][4B src IPv4][n samples]
     const dv = new DataView(ev.data)
     const channel = dv.getUint8(1)
     if (channel !== 0x02) return // conventional only for the main view
-    const rangeLower = dv.getFloat32(6, true)
-    const n = dv.getUint16(10, true)
-    const srcIP = `${dv.getUint8(12)}.${dv.getUint8(13)}.${dv.getUint8(14)}.${dv.getUint8(15)}`
+    const rangeUpper = dv.getFloat32(6, true)
+    const rangeLower = dv.getFloat32(10, true)
+    const n = dv.getUint16(14, true)
+    const srcIP = `${dv.getUint8(16)}.${dv.getUint8(17)}.${dv.getUint8(18)}.${dv.getUint8(19)}`
     if (filterAddr && srcIP !== filterAddr) return // not the selected source
-    const samples = new Uint8Array(ev.data, 16, n)
-    drawColumn(samples, rangeLower)
+    const samples = new Uint8Array(ev.data, 20, n)
+    const range = rangeUpper > 0 ? rangeUpper : rangeLower // display range = canvas height
+    drawColumn(samples)
+    drawAxis(range)
     // depth from strongest bin past near-field
     let best = -1, bi = -1
     for (let i = 20; i < n; i++) if (samples[i] > best) { best = samples[i]; bi = i }
-    if (bi > 0 && rangeLower > 0) depthEl.textContent = ((bi / n) * rangeLower).toFixed(1) + ' m'
+    if (bi > 0 && range > 0) depthEl.textContent = ((bi / n) * range).toFixed(1) + ' m'
   }
 }
 
@@ -134,6 +152,7 @@ function updateSources (list) {
 srcSel.onchange = () => {
   filterAddr = srcSel.value
   ctx.fillStyle = '#0a0e14'; ctx.fillRect(0, 0, W, H) // clear old source's trace
+  actx.clearRect(0, 0, ax.width, ax.height); lastAxisRange = -1 // reset scale
   depthEl.textContent = '-- m'
 }
 connect()

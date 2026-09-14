@@ -168,19 +168,21 @@ module.exports = function (app) {
     clients = new Set(); sources.clear()
   }
 
-  // compact binary frame:
-  //   [0x01][channel][u32 seq][f32 rangeLower][u16 n][4B src IPv4][n bytes samples]
-  // The source IPv4 lets the webapp filter the waterfall to one source.
+  // compact binary frame (20-byte header):
+  //   [0x01][channel][u32 seq][f32 rangeUpper][f32 rangeLower][u16 n][4B src IPv4][n samples]
+  // rangeUpper is the display range (metres, full canvas height); the source
+  // IPv4 lets the webapp filter the waterfall to one source.
   function packPing (p) {
     const n = p.samples.length
-    const buf = Buffer.allocUnsafe(1 + 1 + 4 + 4 + 2 + 4 + n)
+    const buf = Buffer.allocUnsafe(20 + n)
     buf[0] = 0x01; buf[1] = p.channel
     buf.writeUInt32LE(p.pingSeq >>> 0, 2)
-    buf.writeFloatLE(p.rangeLower || 0, 6)
-    buf.writeUInt16LE(n, 10)
+    buf.writeFloatLE(p.rangeUpper || 0, 6)
+    buf.writeFloatLE(p.rangeLower || 0, 10)
+    buf.writeUInt16LE(n, 14)
     const oct = String(p.address || '').split('.')
-    for (let i = 0; i < 4; i++) buf[12 + i] = oct.length === 4 ? (parseInt(oct[i], 10) & 0xff) : 0
-    p.samples.copy(buf, 16)
+    for (let i = 0; i < 4; i++) buf[16 + i] = oct.length === 4 ? (parseInt(oct[i], 10) & 0xff) : 0
+    p.samples.copy(buf, 20)
     return buf
   }
 
