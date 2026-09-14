@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Navico Sonar</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #0a0e14; color: #cdd6f4; font: 13px/1.4 system-ui, sans-serif; }
+  header { display: flex; gap: 12px; align-items: center; padding: 8px 12px; background: #11161f; border-bottom: 1px solid #1e2530; flex-wrap: wrap; }
+  header b { color: #89b4fa; }
+  select, label { font: inherit; color: inherit; }
+  select { background: #1e2530; border: 1px solid #313847; border-radius: 6px; padding: 4px 8px; }
+  #depth { font-size: 22px; font-weight: 700; color: #a6e3a1; margin-left: auto; }
+  #wrap { position: relative; }
+  canvas { display: block; width: 100%; height: calc(100vh - 46px); image-rendering: pixelated; }
+  #status { position: absolute; left: 8px; bottom: 8px; font-size: 11px; color: #7f849c; background: #0009; padding: 3px 6px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <b>Navico Sonar</b>
+  <label>Source: <select id="src"><option value="">(any)</option></select></label>
+  <label>Palette: <select id="pal"><option>Amber</option><option>Blue</option><option>Ice</option></select></label>
+  <label>Gain: <input id="gain" type="range" min="0.5" max="3" step="0.1" value="1"></label>
+  <span id="depth">-- m</span>
+</header>
+<div id="wrap">
+  <canvas id="c"></canvas>
+  <div id="status">connecting…</div>
+</div>
+<script>
+// Live echogram waterfall. Connects to the plugin WebSocket (default :3336).
+const WS_PORT = new URLSearchParams(location.search).get('ws') || 3336
+const cv = document.getElementById('c'), ctx = cv.getContext('2d')
+const depthEl = document.getElementById('depth'), statusEl = document.getElementById('status')
+const srcSel = document.getElementById('src'), palSel = document.getElementById('pal'), gainEl = document.getElementById('gain')
+let W = 0, H = 0, colBins = 1400
+let filterAddr = ''
+
+function resize () {
+  W = cv.width = cv.clientWidth; H = cv.height = cv.clientHeight
+  ctx.fillStyle = '#0a0e14'; ctx.fillRect(0, 0, W, H)
+}
+window.addEventListener('resize', resize); resize()
+
+// palettes: map amplitude 0..255 -> [r,g,b]
+const palettes = {
+  Amber: a => [a, (a * 0.7) | 0, (a * 0.15) | 0],
+  Blue: a => [(a * 0.2) | 0, (a * 0.6) | 0, a],
+  Ice: a => { const t = a / 255; return [(t * t * 255) | 0, (t * 200) | 0, (80 + t * 175) | 0] }
+}
+
+function drawColumn (samples, rangeLower) {
+  const gain = parseFloat(gainEl.value)
+  const pal = palettes[palSel.value] || palettes.Amber
+  // scroll left by 1px
+  const img = ctx.getImageData(1, 0, W - 1, H)
+  ctx.putImageData(img, 0, 0)
+  // draw new column at right edge
+  const col = ctx.createImageData(1, H)
+  const n = samples.length
+  for (let y = 0; y < H; y++) {
+    const bin = (y / H * n) | 0
+    let a = samples[bin] * gain; if (a > 255) a = 255
+    const [r, g, b] = pal(a | 0)
+    const o = y * 4
+    col.data[o] = r; col.data[o + 1] = g; col.data[o + 2] = b; col.data[o + 3] = 255
+  }
+  ctx.putImageData(col, W - 1, 0)
+  // depth scale ticks (right side) every 25% of range
+  if (rangeLower > 0) {
+    ctx.fillStyle = '#0006'; ctx.fillRect(W - 46, 0, 46, H)
+    ctx.fillStyle = '#bac2de'; ctx.font = '11px system-ui'
+    for (let k = 0; k <= 4; k++) {
+      const y = (H * k / 4) | 0
+      ctx.fillText(((rangeLower * k / 4)).toFixed(0) + 'm', W - 42, Math.min(H - 2, y + 11))
+    }
+  }
+}
+
+function connect () {
+  const ws = new WebSocket(`ws://${location.hostname}:${WS_PORT}`)
+  ws.binaryType = 'arraybuffer'
+  ws.onopen = () => { statusEl.textContent = 'connected' }
+  ws.onclose = () => { statusEl.textContent = 'disconnected — retrying'; setTimeout(connect, 1500) }
+  ws.onmessage = (ev) => {
+    if (typeof ev.data === 'string') {
+      const m = JSON.parse(ev.data)
+      if (m.type === 'sources') updateSources(m.sources)
+      return
+    }
+    // binary ping frame
+    const dv = new DataView(ev.data)
+    const channel = dv.getUint8(1)
+    if (channel !== 0x02) return // conventional only for the main view
+    const rangeLower = dv.getFloat32(6, true)
+    const n = dv.getUint16(10, true)
+    const samples = new Uint8Array(ev.data, 12, n)
+    drawColumn(samples, rangeLower)
+    // depth from strongest bin past near-field
+    let best = -1, bi = -1
+    for (let i = 20; i < n; i++) if (samples[i] > best) { best = samples[i]; bi = i }
+    if (bi > 0 && rangeLower > 0) depthEl.textContent = ((bi / n) * rangeLower).toFixed(1) + ' m'
+  }
+}
+
+function updateSources (list) {
+  const cur = srcSel.value
+  srcSel.innerHTML = '<option value="">(any)</option>'
+  for (const s of list) {
+    const o = document.createElement('option')
+    o.value = s.address; o.textContent = `${s.name} — ${s.model}${s.transducer ? ' [' + s.transducer + ']' : ''}`
+    srcSel.appendChild(o)
+  }
+  srcSel.value = cur
+}
+srcSel.onchange = () => { filterAddr = srcSel.value }
+connect()
+</script>
+</body>
+</html>

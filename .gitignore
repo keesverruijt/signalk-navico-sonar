@@ -1,0 +1,7 @@
+node_modules/
+*.log
+.DS_Store
+
+# captures contain device MACs/serials + network layout — not published
+test/fixtures/*.pcap
+test/captures/

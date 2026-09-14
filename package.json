@@ -1,0 +1,16 @@
+{
+  "name": "signalk-navico-sonar",
+  "version": "0.1.0",
+  "description": "Signal K consumer for the Navico NEON sonar network protocol (reverse-engineered). Discovers network sonar sources (Vulcan, NEON MFD-hosted CSM sonar), emits depth deltas, and serves a live echogram waterfall webapp.",
+  "main": "index.js",
+  "keywords": ["signalk-node-server-plugin", "signalk-webapp", "navico", "sonar", "echosounder", "neon"],
+  "signalk-plugin-enabled-by-default": false,
+  "scripts": {
+    "test": "node test/parse-pcap.js test/fixtures/zeuss_conventional.pcap",
+    "replay": "node tools/replay-pcap.js"
+  },
+  "author": "kees",
+  "license": "MIT",
+  "dependencies": { "ws": "^8.16.0" },
+  "engines": { "node": ">=16" }
+}
